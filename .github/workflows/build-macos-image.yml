@@ -38,103 +38,53 @@ jobs:
     if: ${{ inputs.macos_version != '' && inputs.image_format != '' }}
     runs-on: ubuntu-slim
     timeout-minutes: 5
-    outputs:
-      _build: ${{ steps.check.outputs._build }}
 
     steps:
       - name: Preflight
-        id: check
         run: |
+          sum() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
+
           # Third time's the charm
-          if [ ${{ github.run_attempt }} -ge 3 ]; then
-            echo "_build=true" >> $GITHUB_OUTPUT
+          if [ ${{ github.run_attempt }} -ge 3 ] || [ ${{ github.run_number }} -ge 3 ]; then
             exit 0
           fi
 
+          # Most users arrive directly at the Actions tab without reading the
+          # README, missing the prebuilt images in the Releases tab. Requiring
+          # a star (step 1 of the README) reduces redundant builds - and runner
+          # costs - for images that may already exist in a recent forks list.
+          #
+          # GET /repos/{owner}/{repo}/stargazers has been admin/collaborator
+          # only since 2026-06-30, and Actions' app-install token is refused
+          # even on its own repo ("Resource not accessible by integration").
+          # Ask the reverse question instead - is this repo in the actor's
+          # starred list - which is still unrestricted. Sorted newest-first,
+          # so a star made just before dispatching lands on page 1.
           FOUND=false
           PAGE=1
-          while [ $PAGE -le 50 ]; do
+          while [ $PAGE -le 5 ]; do
             DATA=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/LongQT-sea/macos-iso-builder/stargazers?per_page=100&page=${PAGE}")
-            echo "$DATA" | jq -e --arg user "$GITHUB_ACTOR" 'any(.[]; .login == $user)' > /dev/null && FOUND=true && break
-            [ "$(echo "$DATA" | grep -c '"login"')" -lt 100 ] && break
+              "https://api.github.com/users/${{ github.actor }}/starred?per_page=100&page=${PAGE}")
+            [ "$(echo "$DATA" | jq -r 'type')" = "array" ] || break
+            echo "$DATA" | jq -e 'any(.[]; .full_name == "LongQT-sea/macos-iso-builder")' > /dev/null && FOUND=true && break
+            [ "$(echo "$DATA" | jq 'length')" -lt 100 ] && break
             PAGE=$((PAGE + 1))
           done
 
           if [ "$FOUND" = "false" ]; then
-            VERSION_NORMALIZED=$(echo "${{ inputs.macos_version }}" | tr ' ' '_')
-            FORMAT="${{ inputs.image_format }}"
-            FOUND_RUN_URL=""
-            FOUND_ARTIFACT_NAME=""
-            PAST_15_DAYS=$(date -u -d '15 days ago' +%Y-%m-%dT%H:%M:%SZ)
-            PAGE=1
-
-            while true; do
-              FORKS=$(curl -s \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/LongQT-sea/macos-iso-builder/forks?sort=newest&per_page=100&page=${PAGE}")
-              [ "$(echo "$FORKS" | jq 'length')" -eq 0 ] && break
-              RECENT=$(echo "$FORKS" | jq -r --arg date "$PAST_15_DAYS" \
-                '.[] | select(.created_at > $date) | .full_name')
-              [ -z "$RECENT" ] && break
-              while IFS= read -r fork_full_name; do
-                [ -z "$fork_full_name" ] && continue
-                RUN_ID=$(curl -s \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                  "https://api.github.com/repos/${fork_full_name}/actions/runs?status=success&per_page=10" \
-                  | jq -r --arg date "$PAST_15_DAYS" '
-                    .workflow_runs[]
-                    | select(.name == "Build Full Installer ISO/DMG image")
-                    | select(.created_at > $date)
-                    | .id' | head -1)
-                [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ] && continue
-                MATCH=$(curl -s \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                  "https://api.github.com/repos/${fork_full_name}/actions/runs/${RUN_ID}/artifacts" \
-                  | jq -r --arg v "macOS_${VERSION_NORMALIZED}" --arg f "$FORMAT" '
-                    .artifacts[]
-                    | select(.name | startswith($v) and (endswith($f) or endswith($f + ".img")))
-                    | select(.expired == false)
-                    | .name' | head -1)
-                if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
-                  FOUND_RUN_URL="https://github.com/${fork_full_name}/actions/runs/${RUN_ID}"
-                  FOUND_ARTIFACT_NAME="$MATCH"
-                  break 2
-                fi
-              done < <(echo "$RECENT")
-              PAGE=$((PAGE + 1))
-            done
-
-            if [ -n "$FOUND_RUN_URL" ]; then
-              echo "## Found **${FOUND_ARTIFACT_NAME}** in a recent fork" >> $GITHUB_STEP_SUMMARY
-              echo "**[${FOUND_RUN_URL}](${FOUND_RUN_URL})**" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "1. Open the link above" >> $GITHUB_STEP_SUMMARY
-              echo "2. Scroll down to the **Artifacts** section" >> $GITHUB_STEP_SUMMARY
-              echo "3. Click **${FOUND_ARTIFACT_NAME}** to download" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "> [!TIP]" >> $GITHUB_STEP_SUMMARY
-              echo "> Want to build your own latest version? Star :star: [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to skip this search and go straight to build next time." >> $GITHUB_STEP_SUMMARY
-              echo "> <br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "No recent builds found in forks. Starting build..." >> $GITHUB_STEP_SUMMARY
-              echo "Star :star: [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to skip this search and go straight to build next time." >> $GITHUB_STEP_SUMMARY
-              echo "<br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)" >> $GITHUB_STEP_SUMMARY
-              echo "_build=true" >> $GITHUB_OUTPUT
-            fi
-            exit 0
+            sum "## Before you build - check if someone already did it for you :point_down:" \
+                "" \
+                "Browse the **[Recent Forks List](https://github.com/LongQT-sea/macos-iso-builder/releases/latest)** - someone may have already built the macOS version you need." \
+                "" \
+                "If you still need to build your own, star [the repo](https://github.com/LongQT-sea/macos-iso-builder) first - that's step 1 in the [README](https://github.com/LongQT-sea/macos-iso-builder#how-to-use). :star:" \
+                "<br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)"
+            exit 1
           fi
-
-          echo "_build=true" >> $GITHUB_OUTPUT
 
   build-macos-image:
     needs: preflight
-    if: needs.preflight.outputs._build == 'true'
     runs-on: macos-15-intel
     timeout-minutes: 80
 
@@ -174,24 +124,26 @@ jobs:
       - name: Summary
         if: always()
         run: |
+          sum() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
+
           if [ "${{ steps.create_image.outcome }}" == "failure" ]; then
-            echo "## Download macOS failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
-            echo "> This runner may have network issues. Please **re-run the workflow** to try a different runner." >> $GITHUB_STEP_SUMMARY
+            sum "## Download macOS failed" \
+                "" \
+                "> [!WARNING]" \
+                "> This runner may have network issues. Please **re-run the workflow** to try a different runner."
           elif [ "${{ job.status }}" == "success" ]; then
             if [ "${{ inputs.image_format }}" == "iso" ]; then
-              echo "## Successfully built $(basename *.iso)" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "> [!Important]" >> $GITHUB_STEP_SUMMARY
-              echo "> This ISO image is intended for creating macOS virtual machines on Proxmox VE, QEMU, VMware, and VirtualBox." >> $GITHUB_STEP_SUMMARY
+              sum "## Successfully built $(basename *.iso)" \
+                  "" \
+                  "> [!Important]" \
+                  "> This ISO image is intended for creating macOS virtual machines on Proxmox VE, QEMU, and VMware."
             else
-              echo "## Successfully built $(basename *.dmg.img)" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "> [!Important]" >> $GITHUB_STEP_SUMMARY
-              echo '> This DMG image is intended for flashing to USB drive using [Rufus](https://rufus.ie/en/#download) *(Windows)* or `dd` *(Linux)*.' >> $GITHUB_STEP_SUMMARY
+              sum "## Successfully built $(basename *.dmg.img)" \
+                  "" \
+                  "> [!Important]" \
+                  '> This DMG image is intended for flashing to USB drive using [Rufus](https://rufus.ie/en/#download) *(Windows)* or `dd` *(Linux)*.'
             fi
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> [!TIP]" >> $GITHUB_STEP_SUMMARY
-            echo "> Enable [Cloudflare WARP](https://one.one.one.one/) for faster download from GitHub artifact." >> $GITHUB_STEP_SUMMARY
+            sum "" \
+                "> [!TIP]" \
+                "> Enable [Cloudflare WARP](https://one.one.one.one/) for faster download from GitHub artifact."
           fi
